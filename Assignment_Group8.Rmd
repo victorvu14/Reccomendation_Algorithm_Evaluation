@@ -1,0 +1,1548 @@
+---
+title: "Recommendation Engine For BigMovieLense & Groceries"
+author: 'Group 8: Camille Blain-Coallier, Federico C. Loguercio, Giulio
+  De Felice, Nayla Fakhoury, Alejandro Koury, Victor Vu Duy Phuoc, Vikas Agarwal'
+output: html_document
+---
+### Group 8: 
+
+## OBJECTIVE
+
+The objective of this report is to identify the best recommendation algorithm for the bigMovieLense and Groceries Dataset. In the case of bigMovieLense, the aim of the algorithm is to recommend users movies they haven't seen but would like to see. While for Groceries, the algorithm aims to recommend users the the most relevant products that they would likely to buy. The core metrics that we adopt to evaluate the algorithm are: Accuracy, Precision and Mean Squared Error. 
+
+  - Accuracy measures how often the algorithm is correct out of all predictions
+  - Root mean square estimation is an estimate for the average difference between the
+    predicted value and the actual value. We aim at an algorithm with the lowest RMSE. 
+  - Precision: Out of all the recommended items, how many did the user actually like. The higher the              precision the better the algorithm. 
+
+## I. MOVIELENSE DATASET
+
+This section explores the different algorithms and different parameters of each algorithm for the dataset bigMovieLense. There is 6,040 users and 3,449 movies making 999,714 ratings. 
+
+## 1. SCOPE 
+
+We decided not to explore the **Content Based** algorithm because this algorithm requires a large amount of information of item's own features, rather than using users' interactions and feedbacks. However, in this case, we do not have such information to perform this algorithm. 
+
+**Association Rule** focuses on which movies frequently appeared together. It does not take into consideration the user's past history; what counts is what the user is presently watiching. However, in our case, it is hard to find a basket of movies that appear together for multiple user. The algorithm will be bias toward popular movies which most users watch. This algorithm works well with datasets that has low number of items and large user base. There are large number of movies in this dataset, thus the recommendation is likely to result in low value. 
+
+We have identified that Recommender builds on **Collaborative Filtering**, which is the most appropriate for this dataset, because it contains rich history of interraction among users and movies. Collaborative Filtering (CF) is a method of making automatic predictions about the interests of a user by learning its preferences based on information of his engagements with a set of available items, along with other user's engagements with the same set of items. Specifically, we will focus on three families of algorithms: User Based Collaborative Filtering, Item Based Collaborative Filtering and Alternative Least Squares. Item based filtering uses similarity between the items to determine whether a user would like it or not, whereas User Based finds users with similar consumption patterns as yourself and gives you the content that these similar users found interesting. Alternative Least Squares helps optimize the loss function and the rating matrix. 
+
+## 2. EXPLORATORY ANALYSIS
+
+**Download Required Packages**
+
+```{r eval=TRUE, echo=FALSE}
+library("recommenderlab")
+library("ggplot2")
+```
+
+```{r eval=TRUE, echo=FALSE}
+##Load The bidMovieLense data
+load("bigMovieLense.RData")
+```
+
+**Number of users in the database**
+
+```{r eval=TRUE, echo=FALSE}
+nrow(bigMovieLense)
+```
+There are 6,040 users in the dataset. 
+
+**Number of movies in the database**
+
+```{r eval=TRUE, echo=FALSE}
+length(bigMovieLense[1,]@data)
+```
+There are 3,449 movies in this dataset. This could be interpreted as a small dataset with limited number of users and movies. 
+
+**Which movies have been viewed the most?**
+
+```{r eval=TRUE, echo=FALSE}
+views_per_movie <- colCounts(bigMovieLense)
+views_per_movie[order(views_per_movie, decreasing = TRUE) ][1:10]
+
+```
+
+We used **colCounts** function to rank the most rated movies in the dataset. American Beauty and Starwars are amongst the most highly rated movies.  
+
+**Average Ratings Per Movie**
+
+```{r eval=TRUE, echo=FALSE}
+average_ratings <- colMeans(bigMovieLense)
+qplot(average_ratings) + 
+  stat_bin(binwidth = 0.1) + 
+  ggtitle("Distribution of the average movie rating")
+```
+
+From the histogram above, we could see that most ratings have a score of 3 and above. A significant chunk of the ratings are within the range of 3 and 4. Few movies have an average rating of 1 or 5. From this observation, we will use 3 as our benchmark for goodRating, which will be applied throughout the project.
+
+#DATA PREPARATION 
+
+##Subset the data with only movies with high number of ratings 
+Users who have rated at least 100 movies and Movies that have been watched at least 100 times. We further subset this dataset to 500 users. Having users that watch a high number of movies avoid for the algorithm to run into the issue of "Visitor Cold Start", where there is no history of new user. While having movies with high number of ratings to avoid the problem of "Product Cold Start", when a new movie is introduced to the dataset, it contains no or few ratings. Subsetting the data this way, this analysis will solely focus on active users and will not focus on new users.
+
+Data is further subsetted by 1/3. Evaluated dataset contains 2,000 users and 1,000 movies with 279,716 ratings. The data could be reset after we find out the best algorithm with optimal parameters. 
+
+
+```{r eval=TRUE, echo=FALSE}
+set.seed(123)
+ratings_movies <- bigMovieLense[rowCounts(bigMovieLense) > 100, colCounts(bigMovieLense) > 100] 
+ratings_movies <- ratings_movies[,sample(ncol(ratings_movies), 1000) ]
+ratings_movies <- ratings_movies[sample(nrow(ratings_movies), 2000), ]
+ratings_movies 
+
+```
+
+
+## TRAIN SPLIT TEST ON SUBSET DATA
+
+First, we randomly define the which_train vector that is TRUE for users in the training set and FALSE for the others. We will set the probability in the training set as 80 percent and 20 percent in the test set. Also, we set k to be 5 folds for faster testing. We decided to apply 3 folds cross validation instead of pure splitting, as this helps train the model to capture more the patterns from the data. We also assume that a 3 is a good rating for movie. Setting given as "all but one" means that the algorithm will train all the ratings except 1 for testing. We do not binarize the dataset as this raises an error with parameter normalization. 
+
+```{r eval=TRUE, echo=FALSE}
+set.seed(123)
+esSplit <- evaluationScheme(ratings_movies, method="cross", train=0.8,
+                            given=-1, goodRating = 3, k = 3)
+
+getData(esSplit, "train") #Training Set
+getData(esSplit, "known") #Test Set
+getData(esSplit, "unknown") 
+```
+
+## 3. MODEL EVALUATION
+
+For this section, we will build and evaluate a number of different user-user and item-item collaborative filter models by varying the different parameters. We will also leverage some of the built in features of *recommenderlab* to evaluate the various models at different recommendation levels. We will measure the RMSE and look at the ROC plot and the precision-recall plots for various numbers of recommendations.
+
+## 3.1 - User-Based Colaborative Filtering
+We start by looking at the performance of the user-user Collaborative Filtering recommender. We will be adjusting a number of different available parameters to attempt to the find the best performing model. Lets start with the neighborhood size.
+
+### 3.1.1 - Neighborhood Size 
+
+We will start by looking at 6 different neighborhood sizes for the user-based CF. We decided the range of nearest neighborhood (nn) to be from 10 to 100. It is not appropriate to use a very large number of nearest neighbors since the data set has only 6,040 users. 
+
+```{R}
+
+user_nn <- list(
+  "10 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=10)),
+  "20 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=20)),
+  "40 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=40)),
+  "60 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=60)),
+  "80 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=80)),
+  "100 NN" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=100))
+)
+
+#Evaluate the above algorithm in recommending from 1 to 100 movies.
+recs <- c(1,5, 10, 20, 50, 100)
+user_nn_results <- evaluate(esSplit, user_nn, n = recs, progress = FALSE)
+```
+
+**ROC Curve**
+```{R}
+# Draw the ROC curve
+plot(x = user_nn_results, y = "ROC", annotate = 4, legend="topleft")
+```
+
+**Precision / Recall Curve**
+```{R}
+# Draw the precision / recall curve
+plot(x = user_nn_results, y = "prec/rec", annotate = 5, legend="topright")
+```
+
+
+**Calculating Accuracy for 100 Nearest Neighbors**
+
+From the above graphs, we see that 100 nearest neighbors slightly outperform the others in the ROC and precision vs recall curves for all numbers of recommendations. The downward trend in the precision recall curve shows that the increase in number of item predicted resulted in a lower precision rate and higher recall rate. We will move on to calculate the accuracy rate of UCBF model at 100 nn in predicting 10 items. 
+
+```{R}
+
+model1 <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", nn=100))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+#Create dataframe with information about TP, TN, FP and FP to calculate Accuracy. 
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- as.data.frame((rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1]))
+colnames(accuracy1) <- 'Accuracy'
+rownames(accuracy1) <- 'UCBF 100NN'
+accuracy1
+```
+
+**Calculating the RMSE for UBCF with 100 Nearest Neighbors** 
+
+```{R}
+
+model_nn100 <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", nn=100))
+#Apply predict funtion with type = "ratings" to observe the Mean Squared Error
+prediction_nn100 <- predict(model_nn100, getData(esSplit, "known"), type="ratings")
+rmse_ubcf_nn100 <- (calcPredictionAccuracy(prediction_nn100, getData(esSplit, "unknown")))
+
+rmse<-as.data.frame(rmse_ubcf_nn100[1])
+colnames(rmse) <- 'RMSE'
+rownames(rmse) <- 'UCBF 100NN'
+rmse
+
+```
+
+UBCF with 100 nearest neighbors has a high Accuracy Rate of 0.989 and low RMSE of 0.969. We decide to move along with 100 nearest neighbors as this nn level outperforms the other parameters. As we can observe, the more K neighbors we consider (under a certain threshold), the better my classification should be. Nevertheless, the more users there are in the system, the greater the cost of finding the nearest K neighbors will be. 
+
+
+### 3.1.2 - Normalization Method
+
+Keeping nn as 100, the next parameter of interest is the method of normalization. There are two parameters to be tested here: center and z-score.
+
+```{R}
+user_norm <- list(
+  "Center" = list(name="UBCF", param=list(normalize = "center",
+                                         method="Cosine",
+                                         nn=100)),
+  "Z-score" = list(name="UBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         nn=100))
+)
+#Evaluate the 2 normalization in recommending from 1 - 100 movies
+user_norm_results <- evaluate(esSplit, user_norm, n = recs, progress = FALSE)
+```
+
+
+**ROC Curve**
+
+
+```{R}
+# Draw the ROC curve
+plot(x = user_norm_results, y = "ROC", annotate = 1, legend="topleft")
+```
+
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = user_norm_results, y = "prec/rec", annotate = 1)
+```
+
+**Comparing Accuracy**
+
+We can see from the above graphs that the two normalized methods yield very similar result in term of ROC curve and Precision curve. We will proceed to evaluate the accuracy score of both methods.
+
+```{R}
+model1 <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", nn=100))
+#Test model in predicting 10 items
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1])
+         
+model <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "center", method="Cosine", nn=100))
+#Test model in predicting 10 items
+prediction <- predict(model, getData(esSplit, "known"), type="topNList", n = 10)
+rmse <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy <- (rmse[1,1] + rmse[4,1])/(rmse[1,1] + rmse[2,1] + rmse[3,1] + rmse[4,1])
+
+
+accu_table <- rbind(accuracy1,accuracy)
+rownames(accu_table)[1] <- 'Z-score'
+rownames(accu_table)[2] <- 'Center'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+**Calculating the RMSE**  
+
+The accuracy score of Center normalization is slightly higher. We will move on to evaluate base on the RMSE. 
+
+```{R}
+#Calculate rmse score for Z-score normalize
+model_z <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", nn=100))
+prediction_z <- predict(model_z , getData(esSplit, "known"), type="ratings")
+rmse_ubcf_z <- calcPredictionAccuracy(prediction_z, getData(esSplit, "unknown"))[1]
+
+#Calculate rmse score for Center normalize
+model_c <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "center", method="Cosine", nn=100))
+prediction_c <- predict(model_c, getData(esSplit, "known"), type="ratings")
+rmse_ubcf_c <- calcPredictionAccuracy(prediction_c, getData(esSplit, "unknown"))[1]
+
+#Create table using rbind of two rmse scores
+rmse_table <- rbind(rmse_ubcf_z,rmse_ubcf_c)
+rownames(rmse_table)[1] <- 'Z-score'
+rownames(rmse_table)[2] <- 'Center'
+rmse_table 
+```
+
+The RMSE score of prediction is slightly lower for the Z- Score. However, Center has higher accuracy, which is our main evaluation metric. Thus, we will move along with Center. At this point, we have NN = 100 and Normalization = Center as our UBCF parameters.
+
+### 3.1.3 - Distance Methods
+
+The final parameter that we will be tweaking is the measurement of the distance or similarity of a user and their nearest neighbors. To do this, we will look at three different measurements of the similarity: Pearson, Cosine, and Jaccard distances. Using the results from the previous analysis we will use the 100 nearest neighbors and the Z-score normalization as we analyze the distance parameter.
+
+
+```{R}
+user_dist <- list(
+  "Pearson" = list(name="UBCF", param=list(normalize = "Center",
+                                         method="pearson",
+                                         nn=100)),
+  "Cosine" = list(name="UBCF", param=list(normalize = "Center",
+                                         method="Cosine",
+                                         nn=100)),
+  "Jaccard" = list(name="UBCF", param=list(normalize = "Center",
+                                         method="jaccard",
+                                         nn=100))
+)
+#Evaluate the 3 similarity methods in recommending from 1 - 100 movies
+user_dist_results <- evaluate(esSplit, user_dist, n = recs, progress = FALSE)
+```
+
+**ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = user_dist_results, y = "ROC", annotate = 3, legend="bottomright")
+```
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = user_dist_results, y = "prec/rec", annotate = c(1,3), legend="topright")
+```
+
+**Comparing Accuracy** 
+
+We can see from the above graphs that the Jaccard distance performs slightly better than the other 2 distance measuring methods. Looking at the Precision and Recall curve, Jaccard method shows good precision for small number of items prediction (below 20), while Pearson shows better performance for larger predictions. Both Jaccard and Pearson perform well so we will go ahead and calculate the Accuracy for both to determine which is the best.  
+
+```{R}
+#Calculating Accuracy score for Jaccard
+model1 <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Center", method="Jaccard", nn=100))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList")
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1])
+
+#Calculating Accuracy score for Pearson
+model <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Center", method="Pearson", nn=100))
+prediction <- predict(model, getData(esSplit, "known"), type="topNList")
+rmse <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy <- (rmse[1,1] + rmse[4,1])/(rmse[1,1] + rmse[2,1] + rmse[3,1] + rmse[4,1])
+
+
+accu_table <- rbind(accuracy1,accuracy)
+rownames(accu_table)[1] <- 'Jaccard'
+rownames(accu_table)[2] <- 'Pearson'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+**Comparing RMSE**
+
+The Accuracy is slightly higher for Jaccard. We will move on to compare the RMSE.
+
+```{R}
+#Calculating RMSE of Pearson
+model1 <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="pearson", nn=100))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="ratings")
+rmse1 <- calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"))[1]
+
+#Calculating RMSE of Jaccard
+model <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Z-Score", method="jaccard", nn=100))
+prediction <- predict(model, getData(esSplit, "known"), type="ratings")
+rmse_dist <- calcPredictionAccuracy(prediction, getData(esSplit, "unknown"))[1]
+
+#Binding the two results into 1 table
+rmse_table <- rbind(rmse1,rmse_dist)
+rownames(rmse_table)[1] <- 'Pearson'
+rownames(rmse_table)[2] <- 'Jaccard'
+rmse_table 
+
+```
+
+
+As we can see from the results above, Jaccard distance yields better accuracy with lower RMSE. Thus, we will keep this parameter. Our best user based collaborative filtering model ends up incorporating the following parameters:  
+
+  * Uses the 100 nearest neighbors
+  * Normalizes the data using the Center
+  * Calculates the similarity using Jaccard's Similarity
+  
+
+## 3.2 - Item Based Collaborative Filtering  
+Having developed a best performing model using user based collaborative filtering, we will now work on developing an item based collaborative filter. We will follow the same methodology as a above to find our best item based model and compare these two models to each other.  
+
+
+### 3.2.1 - Neighborhood Size 
+We will start by looking at 4 different neighborhood sizes for the item-based CF. K is the number of movies you want to keep for each row. As K is very small, you are going to recommend always the same items and a huge K causes a huge dense simmilarityMatrix. Thus, we would want a decent large K number. Due to the limited number of movies in our dataset, we will keep the testing range from 10 to 100. We keep other parameters constant for testing purposes. It is recommendable that larger datasets should use larger K for better recommendations. 
+
+
+```{R}
+
+item_nn <- list(
+  "10 K" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=10)),
+  "20 K" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=20)),
+  "50 K" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=50)),
+  "100 K" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=100))
+)
+
+# Run the algorithm and oredict the next n movies for comparison purposes
+recs <- c(1,5, 10, 20, 50, 100)
+item_nn_results <- evaluate(esSplit, item_nn, n = recs, progress = FALSE)
+```
+
+**ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = item_nn_results, y = "ROC", annotate = 1, legend="topleft")
+```
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = item_nn_results, y = "prec/rec", annotate = 1)
+```
+
+**Comparing Accuracy**
+
+Looking at the Precision/Recall Curve, all neighborhood sizes perform well when we make less than 20 items prediction (over this threshold, the curve started to flatten out). This is a sign that IBCF works well with smaller predictions. The 20K and 100K show the most promising precision rates, thus we will move on to calculate the accuracy of these two neighboring levels.  
+
+```{R}
+#Calculate Accuracy of K = 20 neighbors
+model1 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k=20))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1])
+
+#Calculate Accuracy of K = 100 neighbors
+model <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k=100))
+prediction <- predict(model, getData(esSplit, "known"), type="topNList", n = 10)
+rmse <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy <- (rmse[1,1] + rmse[4,1])/(rmse[1,1] + rmse[2,1] + rmse[3,1] + rmse[4,1])
+
+#Binding the result into 1 table
+accu_table <- rbind(accuracy1,accuracy)
+rownames(accu_table)[1] <- '20K'
+rownames(accu_table)[2] <- '100K'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+
+**Calculating the RMSE** 
+
+The prediction accuracies of the 100K neighborhood and the 20K neighborhood are similar. We will move on to evaluate the RMSE of IBCF with 100 and 20 neighbouring items.
+
+
+```{R}
+#Calculate RMSE of K=100
+item_model_100 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k= 100))
+item_prediction_100 <- predict(item_model_100, getData(esSplit, "known"), type="ratings")
+rmse_ibcf_100 <- calcPredictionAccuracy(item_prediction_100, getData(esSplit, "unknown"))[1]
+
+#Calculate RMSE of K=20
+item_model_20 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k=20))
+item_prediction_20 <- predict(item_model_20, getData(esSplit, "known"), type="ratings")
+rmse_ibcf_20 <- calcPredictionAccuracy(item_prediction_20, getData(esSplit, "unknown"))[1]
+
+#Combine the two calculation into 1 table
+rmse_table <- rbind(rmse_ibcf_100,rmse_ibcf_20)
+rownames(rmse_table)[1] <- '100K'
+rownames(rmse_table)[2] <- '20K'
+rmse_table
+```
+
+
+The result above shows that the model with k = 100 yields a prediction with a lower mean square error of 1.29. Thus we will move along with the parameter of 100 items in the neighborhood. 
+
+
+### 3.2.2 - Normalization Methods
+Keeping k at 100, our next parameter of interest is the method of normalization. The two parameters to be tested are: center and z-score.
+
+```{R}
+item_norm <- list(
+  "Center" = list(name="IBCF", param=list(normalize = "center",
+                                         method="Cosine",
+                                         k=100)),
+  "Z-score" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=100))
+)
+#Evaluating the algorithm for predicting from 1 - 100 movies
+item_norm_results <- evaluate(esSplit, item_norm, n = recs, progress = FALSE)
+```
+
+**Drawing the ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = item_norm_results, y = "ROC", annotate = 1, legend="topleft")
+```
+
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = item_norm_results, y = "prec/rec", annotate = 1)
+```
+
+**Comparing Accuracy**
+The two normalization methods perform similarly in the ROC curve, however Center normalize leads to higher precision for small predictions. We will proceed to evaluate the accuracy of these two models. 
+
+```{R}
+#Calculate Accuracy of IBCF with Z-Score Normalization
+model1 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k=100))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1])
+
+#Calculate Accuracy of IBCF with Center Normalization
+model <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Center", method="Cosine", k= 100))
+prediction <- predict(model, getData(esSplit, "known"), type="topNList", n = 10)
+rmse <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy <- (rmse[1,1] + rmse[4,1])/(rmse[1,1] + rmse[2,1] + rmse[3,1] + rmse[4,1])
+
+#Combining two score into 1 table
+accu_table <- rbind(accuracy1,accuracy)
+rownames(accu_table)[1] <- 'Z-Score'
+rownames(accu_table)[2] <- 'Center'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+**Calculating the RMSE**  
+
+The Z-score normalization generates slightly higher Accuracy rate. We will move on the calculate the RMSE to see which parameter has lower RMSE.
+
+```{R}
+#Calculate RMSE of IBCF with Z-score
+item_method1 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Cosine", k=100))
+item_prediction1 <- predict(item_method1, getData(esSplit, "known"), type="ratings")
+rmse_ibcf1 <- calcPredictionAccuracy(item_prediction1, getData(esSplit, "unknown"))[1]
+
+#Calculate RMSE of IBCF with Center
+item_method <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "center", method="Cosine", k=100))
+item_prediction <- predict(item_method, getData(esSplit, "known"), type="ratings")
+rmse_ibcf <- calcPredictionAccuracy(item_prediction, getData(esSplit, "unknown"))[1]
+
+#Combine the two calculation into 1 table
+rmse_table <- rbind(rmse_ibcf1,rmse_ibcf)
+rownames(rmse_table)[1] <- 'Z-Score'
+rownames(rmse_table)[2] <- 'Center'
+rmse_table
+```
+
+We can see that Z-score generates a lower prediction error and higher accuracy score. We decide to move on with the Z-score. This is the same normalization technique that we used to calculate the RMSE above, so we will continue using this as our best user based collaborative filtering model. At this point, we have Z-Score as our normalization method and 100 as K number. 
+
+
+### 3.2.3 - Distance Methods
+The final parameter that we will be tweaking is the measurement of the distance or similarity of an item and their nearest neighbors. To do this, we will look at three different measurements of the similarity; the Pearson, Cosine, and Jaccard distances. Using the results from the previous analysis, we will use the 80 nearest items and the Z-score normalization as we analyze the distance parameter.
+
+
+```{R}
+item_dist <- list(
+  "Pearson" = list(name="IBCF", param=list(normalize = "z-score",
+                                         method="pearson",
+                                         k=80)),
+  "Cosine" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Cosine",
+                                         k=80)),
+  "Jaccard" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="jaccard",
+                                         k=80))
+)
+#Evaluating the algorithm for predicting from 1 - 100 movies
+item_dist_results <- evaluate(esSplit, item_dist, n = recs, progress = FALSE)
+```
+
+
+**ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = item_dist_results, y = "ROC", annotate = 3, legend="topleft")
+```
+
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+ plot(x = item_dist_results, y = "prec/rec", annotate = c(1,3))
+```
+
+**Comparing Accuracy Level**
+
+Looking at the ROC Curve and the Precision/Recall graph, it is clear the Pearson performs better for smaller prediction and Jaccard performs well for predictions higher than 20 movies. There is a sharp decrease in precision for Pearson as we increase the number of prediction from 1 to 5. It might be possible that if the company would like to make small recommendations with IBCF, Pearson would be ideal. Let's move on to test the Accuracy of Jaccard and Pearson. 
+
+```{R}
+#Calculate Accucary of IBCF with Jaccard
+model1 <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Jaccard", k=80))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+rmse1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (rmse1[1,1] + rmse1[4,1])/(rmse1[1,1] + rmse1[2,1] + rmse1[3,1] + rmse1[4,1])
+
+#Calculate Accucary of UBCF with Pearson
+model <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Center", method="Pearson", k=80))
+prediction <- predict(model, getData(esSplit, "known"), type="topNList", n = 10)
+rmse <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy <- (rmse[1,1] + rmse[4,1])/(rmse[1,1] + rmse[2,1] + rmse[3,1] + rmse[4,1])
+
+#Combine two calculations into one table
+accu_table <- rbind(accuracy1,accuracy)
+rownames(accu_table)[1] <- 'Jaccard'
+rownames(accu_table)[2] <- 'Pearson'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+**Calculating the RMSE** 
+
+Since the accuracy score for Pearson is slightly higher, this is consistent with our expectations when looking at the ROC curve. We will go ahead and calculate the RMSE for both to determine which is the best.  
+
+
+```{R}
+#Calculate RMSE of IBCF Jaccard
+model <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="jaccard", k=80))
+prediction <- predict(model, getData(esSplit, "known"), type="ratings")
+rmse_item <- calcPredictionAccuracy(prediction, getData(esSplit, "unknown"))[1]
+
+#Calculate RMSE of IBCF Pearson
+model_pea <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-Score", method="Pearson", k=80))
+prediction_pea <- predict(model_pea, getData(esSplit, "known"), type="ratings")
+rmse_item_pea <- calcPredictionAccuracy(prediction_pea, getData(esSplit, "unknown"))[1]
+
+#Combine two calculations into 1 table
+rmse_table <- rbind(rmse_item_pea,rmse_item)
+rownames(rmse_table)[1] <- 'Pearson'
+rownames(rmse_table)[2] <- 'Jaccard'
+rmse_table
+```
+
+**Pearson** has lower prediction error at 1.034 and has a better Accuracy score, which is the most important evaluation metric. We will move along with Pearson similarity. We see that the best performance of the model comes from the Pearson Method of calculating the distance in the item based collaborative filtering model. Our best user based collaborative filtering model ends up incorporating the following parameters:  
+
+  * 100 K Nearest Items
+  * Normalized using the Z-Score
+  * Similarity Calculated using Pearson Method
+
+## 3.3 - Alternating Least Squares 
+
+Now we will move on to find the best parameters for the **Alternating Least Squares** (ALS) algorithm. There are 2 parameters of interest: lambda and Normalization method. We will first evaluate the lamda parameter. As the rating matrix contains both signals and noise, it is important to apply the optimal lamda regularization level, remove noise and use the recovered signal to predict missing ratings. 
+\newline
+
+### 3.3.1 - Regularization Level
+
+We set all other parameters at a default level to see the impact of different lambda values. This algorithm requires very high computational power to process thus the **evaluate function** of recommenderlab would take alot of time to process. We will move ahead to evaluate different parameter using **predict** function. The metrics of evaluation is Accuracy and RMSE. 
+
+**Comparing Accuracy Level**
+
+```{R}
+# Calculating Accuracy of Lambda 0.1 
+model1 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.1))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList", n = 10)
+predict1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (predict1[1,1] + predict1[4,1])/(predict1[1,1] + predict1[2,1] + predict1[3,1] + predict1[4,1])
+
+#Calculating Accuracy of Lambda 0.2 
+model2 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.2))
+prediction2 <- predict(model2, getData(esSplit, "known"), type="topNList", n = 10)
+predict2 <- as.data.frame(calcPredictionAccuracy(prediction2, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy2 <- (predict2[1,1] + predict2[4,1])/(predict2[1,1] + predict2[2,1] + predict2[3,1] + predict2[4,1])
+
+# Calculating Accuracy of Lambda 0.3
+model3 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.3))
+prediction3 <- predict(model3, getData(esSplit, "known"), type="topNList", n = 10)
+predict3 <- as.data.frame(calcPredictionAccuracy(prediction3, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy3 <- (predict3[1,1] + predict3[4,1])/(predict3[1,1] + predict3[2,1] + predict3[3,1] + predict3[4,1])
+
+#Calculating Accuracy of Lambda 0.4
+model4 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.4))
+prediction4 <- predict(model4, getData(esSplit, "known"), type="topNList", n = 10)
+predict4 <- as.data.frame(calcPredictionAccuracy(prediction4, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy4 <- (predict4[1,1] + predict4[4,1])/(predict4[1,1] + predict4[2,1] + predict4[3,1] + predict4[4,1])
+
+# Calculating Accuracy of Lambda 0.5
+model <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.5))
+prediction <- predict(model, getData(esSplit, "known"), type="topNList", n = 10)
+predict_05 <- as.data.frame(calcPredictionAccuracy(prediction, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy5 <- (predict_05[1,1] + predict_05[4,1])/(predict_05[1,1] + predict_05[2,1] + predict_05[3,1] + predict_05[4,1])
+
+# Combining 5 calculations into 1 table
+accu_table <- rbind(accuracy1,accuracy2,accuracy3,accuracy4,accuracy5)
+rownames(accu_table)[1] <- 'Lambda-0.1'
+rownames(accu_table)[2] <- 'Lambda-0.2'
+rownames(accu_table)[3] <- 'Lambda-0.3'
+rownames(accu_table)[4] <- 'Lambda-0.4'
+rownames(accu_table)[5] <- 'Lambda-0.5'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+**Calculating the RMSE of Lambda 0.1** 
+
+From the accuracy table above, we could see that lambda-0.1 has the highest Accuracy rate at 0.98928, thus we will move ahead to adopt this lambda level. 
+
+```{R}
+#Calculating the RMSE of Lambda 0.1
+model_als <- Recommender(getData(esSplit, "train"), method = "ALS", param = 
+                           list(normalize = "Z-Score" , lambda = 0.1))
+prediction_als <- predict(model_als, getData(esSplit, "known"), type="ratings")
+rmse_item_als <- calcPredictionAccuracy(prediction_als, getData(esSplit, "unknown"))[1]
+rmse_item_als
+```
+
+From the accuracy table above, we could see that lambda-0.1 has the highest Accuracy rate at 0.98928 and RMSE at 3.756, thus we will move ahead to adopt this lambda level. 
+
+### 3.3.2 - ALS Normalize method 
+
+Keeping Lambda at 0.1, we will explore which normalization method generates better results. The two categories of interest are: Center and Z-score. 
+
+
+**Comparing Accuracy**
+```{R}
+#Calculating Accuracy of ALS 
+model1 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.1))
+prediction1 <- predict(model1, getData(esSplit, "known"), type="topNList")
+predict1 <- as.data.frame(calcPredictionAccuracy(prediction1, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy1 <- (predict1[1,1] + predict1[4,1])/(predict1[1,1] + predict1[2,1] + predict1[3,1] + predict1[4,1])
+
+model2 <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Center", lambda = 0.1))
+prediction2 <- predict(model2, getData(esSplit, "known"), type="topNList")
+predict2 <- as.data.frame(calcPredictionAccuracy(prediction2, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy2 <- (predict2[1,1] + predict2[4,1])/(predict2[1,1] + predict2[2,1] + predict2[3,1] + predict2[4,1])
+
+
+accu_table <- rbind(accuracy1,accuracy2)
+rownames(accu_table)[1] <- 'Z-Score'
+rownames(accu_table)[2] <- 'Center'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+Z-score normalization yields a slightly better accuracy at 0.98928, thus we will move along with this parameter. Our best Alternative Least Square model has an Accuracy of 0.98928 and RMSE of 3.756. This model is incorporating the following parameters:  
+ 
+  * Regularization Lambda of 0.1
+  * Normalized using the Z-Score
+
+
+## 4. Comparing Algorithms 
+
+In this project, we have attempted to build the best possible collaborative filtering model by tweaking the parameters. Now that we have the three models, lets compare them to each other. First, we will explore the ROC and precision/recall curve. The three algorithms to be tested are: **UCBF**, **IBCF** and **ALS**. We use **Random** and **Popular** as the benchmark algorithms for comparison purpose. 
+
+
+```{R}
+final_algorithms <- list(
+  "UBCF" = list(name="UBCF", param=list(normalize = "Center",
+                                         method="Jaccard",
+                                         nn=100)),
+  "IBCF" = list(name="IBCF", param=list(normalize = "Z-score",
+                                         method="Pearson",
+                                         k=100)),
+  "ALS" = list(name="ALS", param = list(normalize = "Z-Score", lambda = 0.1)),
+  "Random" = list(name = "Random", param = NULL),
+  "Popular" = list(name = "Popular", param = NULL)
+)
+recs <- c(1,5, 10, 20, 50, 100)
+final_results <- evaluate(esSplit, final_algorithms, n = recs, progress = FALSE)
+```
+
+
+**ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = final_results, y = "ROC", annotate = TRUE, legend="topleft")
+```
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+ plot(x = final_results, y = "prec/rec", annotate = c(1,3), legend="topright")
+```
+
+**Comparing Accuracy**
+
+From the graphs above, it is clear that the UBCF and Popular algorithms have the best performance with the highest Area Under the Curve. Random algorithm performs the worst and IBCF performs poorly compare to the other model. We will proceed to compare the accuracy and RMSE of all the algorithms. 
+
+
+```{R}
+modelUBCF <- Recommender(getData(esSplit, "train"), method = "UBCF", 
+                     param=list(normalize = "Center",
+                                         method="Jaccard",
+                                         nn=100))
+predictionUBCF <- predict(modelUBCF, getData(esSplit, "known"), type="topNList", n = 10)
+predictUBCF <- as.data.frame(calcPredictionAccuracy(predictionUBCF, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyUBCF <- (predictUBCF[1,1] + predictUBCF[4,1])/(predictUBCF[1,1] + predictUBCF[2,1] + predictUBCF[3,1] + predictUBCF[4,1])
+
+modelIBCF <- Recommender(getData(esSplit, "train"), method = "IBCF", 
+                     param=list(normalize = "Z-score", method="Pearson", k=100))
+predictionIBCF <- predict(modelIBCF, getData(esSplit, "known"), type="topNList", n = 10)
+predictIBCF <- as.data.frame(calcPredictionAccuracy(predictionIBCF, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyIBCF <- (predictIBCF[1,1] + predictIBCF[4,1])/(predictIBCF[1,1] + predictIBCF[2,1] + predictIBCF[3,1] + predictIBCF[4,1])
+
+modelALS <- Recommender(getData(esSplit, "train"), method = "ALS", 
+                     param=list(normalize = "Z-Score", lambda = 0.1))
+predictionALS <- predict(modelALS, getData(esSplit, "known"), type="topNList", n = 10)
+predictALS <- as.data.frame(calcPredictionAccuracy(predictionALS, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyALS <- (predictALS[1,1] + predictALS[4,1])/(predictALS[1,1] + predictALS[2,1] + predictALS[3,1] + predictALS[4,1])
+
+modelPop<- Recommender(getData(esSplit, "train"), method = "Popular", 
+                     param= NULL)
+predictionPop <- predict(modelPop, getData(esSplit, "known"), type="topNList", n = 10)
+predictPop <- as.data.frame(calcPredictionAccuracy(predictionPop, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyPop <- (predictPop[1,1] + predictPop[4,1])/(predictPop[1,1] + predictPop[2,1] + predictPop[3,1] + predictPop[4,1])
+
+modelRan<- Recommender(getData(esSplit, "train"), method = "Random", 
+                     param= NULL)
+predictionRan <- predict(modelRan, getData(esSplit, "known"), type="topNList", n = 10)
+predictRan <- as.data.frame(calcPredictionAccuracy(predictionRan, getData(esSplit, "unknown"), given=-1, goodRating=3))
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyRan <- (predictRan[1,1] + predictRan[4,1])/(predictRan[1,1] + predictRan[2,1] + predictRan[3,1] + predictRan[4,1])
+
+accu_table <- rbind(accuracyPop, accuracyUBCF,accuracyALS, accuracyIBCF,  accuracyRan)
+rownames(accu_table)[1] <- 'Popular'
+rownames(accu_table)[2] <- 'UBCF'
+rownames(accu_table)[3] <- 'ALS'
+rownames(accu_table)[4] <- 'IBCF'
+rownames(accu_table)[5] <- 'Random'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+
+**Comparing the RMSE of all models** 
+
+
+```{R}
+accuracy_table <- function(scheme, algorithm, parameter){
+  r <- Recommender(getData(scheme, "train"), algorithm, parameter = parameter)
+  p <- predict(r, getData(scheme, "known"), type="ratings")                      
+  acc_list <- calcPredictionAccuracy(p, getData(scheme, "unknown"))
+  total_list <- c(algorithm =algorithm, acc_list)
+  total_list <- total_list[sapply(total_list, function(x) !is.null(x))]
+  return(data.frame(as.list(total_list)))
+}
+
+table_ubcf <- accuracy_table(esSplit, algorithm = "UBCF", param=list(normalize = "z-score",
+                                         method="Jaccard",
+                                         nn=100))
+table_ibcf <- accuracy_table(esSplit, algorithm = "IBCF", param=list(normalize = "Z-score",
+                                         method="Pearson",
+                                         k=100))
+table_ALS <- accuracy_table(esSplit, algorithm = "ALS", 
+                             param = list(normalize = "Z-Score", lambda = 0.1))
+table_popular <- accuracy_table(esSplit, algorithm = "Popular", 
+                             param = NULL)
+table_random <- accuracy_table(esSplit, algorithm = "Random", 
+                             param = NULL)
+
+rbind(table_popular, table_ubcf, table_ibcf,table_random, table_ALS)[1:2]
+
+```
+
+##RESULT DISCUSSION
+
+From our above comparison of the three models, we can see that, with our best parameter set, the **UBCF** model performs better on our test data set than the **IBCF** and **ALS**. The **UBCF** shows better results in both the ROC curve and the precision recall curves. Additionally, UBCF has a higher accuracy score compared to the other 2 models. 
+
+When we look at the RMSE, the measure of accuracy of our predictions, we see that the UBCF has a RMSE of 0.96 while the **IBCF** has a RMSE of 1.02 and **ALS** has very high RMSE of 3.75. Generally, **UBCF** was very quick to make a prediction while the other two models took more time to compile and predict. This might be due to the nature of our dataset with higher number of users than items. If this trend continues over multiple runs of the three models, then it may come down to how often you need to build a new model vs the number of times you need to provide recommendations with these models.
+
+An explanation for the better performance of the **UBCF** could be that in the current dataset, there is still a low number of users. For movie recommendation engines of companies like Netflix and Amazon, IBCF is likely to outperform since the number of users is significantly larger than the number of movies. From a business perspective, a good movie recommendation system is a combination of content-based filtering and collaborative filtering which potentially takes advantage of both the representation of the content as well as the similarities among users. This task could be done with extra information about the content of the movie. 
+
+All the algorithm metrics start to decrease as the number of movies predict increase. The curves start to flatten out after 20 items prediction. Thus, it is recommended that while applying these algorithms, prediction should be made for less than 20 items. Otherwise, precison and accuracy will reduce. 
+
+**Popular** has the highest accuracy and lowest RMSE. One of the reasons is due to the method of data sampling; our subsetted dataset contains only active users and movies with higher than 100 ratings, which is slightly bias toward popular movies. Since we only have a small number of users, recommending a popular and high rating movie will be likely to match with user's taste. **Popular** algorithm is subject to long tail problem where it will only recommend to users popular movies with the most rating. From a business perspective, this is not ideal as the recommendation engine is bias toward popular movies and fails to consider other less popular movies. In this case, Star Wars and American Beauty will be among the most recommended movies only because they have the highest number of ratings. However, certain users might not like these movies. This algorithm would be ideal to apply to new users, where there is no previous interraction, because in this case, only populars movie will be recommended. From here, we can have the possibility to apply other collaborative filtering algorithm.
+
+**Random** algorithm has the lowest accuracy rate. From a business perspective, **Random** algorithm is not appropriate as we do not want to recommend users random movies without taking into consideration their interests or their past behaviour. 
+
+Our final selected model is **UBCF** with parameter of **100 nearest neighbors** and **Jaccard similarity** and **normalise by center**. 
+
+
+# II. GROCERIES DATASET
+
+## 1. Scope
+
+There are many ways to use recommendation engines and models, however for this dataset and this project, we will consider recommending to the consumer what items they should buy next.  
+
+Content based algorithm is a recommendation model based on a description of the item and a profile of the user's preferences.In this case we do not have the profile of the users and their likings; we only have transactions. Hence, applying content based filtering here doesn't apply.
+
+ALS model is another CF model which is applicable for this case and can be a good idea. However, this model is computational expensive and hard to interprete. Thus we will disregard this model. 
+
+
+
+```{r eval=TRUE, echo=FALSE}
+data("Groceries")
+```
+
+## 2. Exploratory Data Analysis
+
+```{r}
+str(Groceries)
+```
+
+**Number of transactions in the database**
+
+```{r eval=TRUE, echo=FALSE}
+nrow(Groceries)
+```
+
+Number of Groceries categories in the database is 169 with the data is classified into 3 categories. The labels mentioned above which are then grouped into 55 levels of 2 categories which are then groupped into 10 levels of 1 category.
+
+```{r eval=TRUE, echo=FALSE}
+length(unique(Groceries@itemInfo[,1]))
+```
+
+**Number of categories 2nd division**
+
+```{r eval=TRUE, echo=FALSE}
+length(unique(Groceries@itemInfo[,2]))
+```
+
+**Number of categories 1st division**
+
+```{r eval=TRUE, echo=FALSE}
+length(unique(Groceries@itemInfo[,3]))
+```
+
+
+**Which item was purchased the most?**
+
+Whole milk is the item that was the most frequently purchased. The Top 10 items purchased can be viewed in the chart below.
+
+```{r eval=TRUE, echo=FALSE}
+set.seed(123)
+#most frequent item bought:
+g<-as(Groceries,"itemMatrix")
+#top 10 items bought
+itemFrequencyPlot(g, topN=10) 
+```
+
+
+### 2.1 - Train Split Test on Original Dataset
+
+First, we transfrom the transaction dataset into a binary one, where true is marked for an item bought and false if it wasn't. Then, we randomly define 80% of the data as the train set, and the rest, it will be subset as the test and holdout set.The evaluation will be on all items but 1. Also, the evaluation method used will be a cross validation with a k equal to 3 folds for faster testing. The reason we chose a cross validation is because we think that it performs a more accurate validation technique than just splitting the data set into two; train on one and test on the other. In cross validation, even the train dataset is divided into k folds and tested.
+
+The data will be divided as such:
+
+```{r eval=TRUE, echo=FALSE}
+set.seed(123)
+g <- as(Groceries, "binaryRatingMatrix")
+
+esSplitg <- evaluationScheme(g, method="cross", train=0.8,
+                            given=-1, k=3)
+
+getData(esSplitg, "train") #Training Set 6
+getData(esSplitg, "known") #Test Set 3
+getData(esSplitg, "unknown") #Holdout Set
+```
+
+## 3. Building and Evaluating the Algorithms
+
+
+For the groceries dataset we will use the following recommendation models:
+  CF: - UBCF
+      - IBCF
+  Popular
+  Association Rule
+  Random
+
+The remaining models: ALS and content based will be mentioned at the end and why they were not selected. 
+
+For this section, we will build and evaluate a number of different models by varying the different parameters. We will also leverage some of the built in features of *recommenderlab* to evaluate our various models. We will evaluate these alogrythms by looking at the ROC curve, the Accuracy, the confusion matrix and the precision-recall plots for various numbers of recommendations.
+We will focus on High Accuracy and the best ROC which will show the effectivness of our recommendations.
+
+We have in our basket 169 items, hence it will make sense to recommend to the users from 1 to 10 items. Of course, if we recommend 100 items, it won't make sense since we are recommending almost all the items available and would miss the point of recommendation. However a maximum of 10 items seems fair and this also depends on our business platform and where we will be recommending the items.
+
+```{r}
+recsg <- c(1,3, 5, 10)
+```
+
+
+### 3.1 - User-Based Colaborative Filtering
+
+We start by looking at the performance of the user-user CF recommender. We will be adjusting the number of different parameters to attempt to find the best performing model. The two parameters of focus here are similarity method and nearest neighbors. Since we binarize the data, normalization method gives an error. We will start with the neighborhood size.
+
+
+#### 3.1.1 - Neighborhood Size 
+
+We will start by looking at 6 different neighborhood sizes for the user-based CF. We have in total 9,835 users which we subset in the train and test sets.
+We chose the lowest NN to be 10 (setting it lower would not make any sense) because we need to have at least 10 of the most similar users to be compared against each other and we chose a maximum of 100, as comparing a user to a number bigger than 100 would be like comparing a fish against all fish in the sea, especially that the total number of users is not very big.
+
+
+```{R}
+user_nng <- list(
+  "10 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=10)),
+  "20 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=20)),
+  "40 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=40)),
+  "60 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=60)),
+  "80 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=80)),
+  "100 NN" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=100))
+)
+recsg <- c(1,3, 5, 10)
+user_nn_resultsg <- evaluate(esSplitg, user_nng, n = recsg, progress = FALSE)
+```
+
+
+**The ROC Curve Chart**
+
+```{R}
+# Draw the ROC curve
+plot(x = user_nn_resultsg, y = "ROC", annotate = 4, legend="bottomright")
+```
+
+**The Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = user_nn_resultsg, y = "prec/rec", annotate = 5, legend="topright")
+```
+
+**Calculation of Accuracy with NN100**
+
+The ROC curve shows that the best model is when the nearest neighbor parameter is equal to 100. At NN = 100, the area under the curve is the largest. Looking at the precision curve, we could see that the precision drops significantly as the number of item predicted increases. We will move on to calculate the accuracy of 100 nearest neighbors. 
+
+```{R}
+model_nn100g <- Recommender(getData(esSplitg, "train"), method = "UBCF", 
+                     param=list( method="Cosine", nn=100))
+prediction_nn100g <- predict(model_nn100g, getData(esSplitg, "known"))
+rmse_ubcf_nn100g <- calcPredictionAccuracy(prediction_nn100g, getData(esSplitg, "unknown"),given=-1)
+df_rmse_ubcf_nn100g <- as.data.frame((rmse_ubcf_nn100g), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyg <- as.data.frame((df_rmse_ubcf_nn100g[1,1] + df_rmse_ubcf_nn100g[4,1])/(df_rmse_ubcf_nn100g[1,1] + df_rmse_ubcf_nn100g[2,1] + df_rmse_ubcf_nn100g[3,1] + df_rmse_ubcf_nn100g[4,1]))
+
+colnames(accuracyg) <-"Accuracy"
+rownames(accuracyg) <-"UBCF - NN100"
+accuracyg
+```
+
+As we can see accuracy of UBCF algorithm at NN 100 is 0.939. We will move ahead at this parameter and start tweaking on the distance method. 
+
+#### 3.1.2 - Distance Methods
+
+The final parameter that we will be tweaking is the measurement of the distance or similarity of a user and their nearest neighbors. To do this, we will look at three different measurements of the similarity; Pearson, Cosine, and Jaccard distances. Using the results from the previous analysis, we will use the 100 nearest neighbors as we analyze the distance parameter.
+
+```{R}
+user_distg <- list(
+  "Pearson" = list(name="UBCF", param=list(method="pearson",
+                                         nn=100)),
+  "Cosine" = list(name="UBCF", param=list(method="Cosine",
+                                         nn=100)),
+  "Jaccard" = list(name="UBCF", param=list(method="jaccard",
+                                         nn=100))
+)
+
+user_dist_resultsg <- evaluate(esSplitg, user_distg, n = recsg, progress = FALSE)
+```
+
+**The ROC Curve Chart**
+
+```{R}
+# Draw the ROC curve
+plot(x = user_dist_resultsg, y = "ROC", annotate = 3, legend="topleft")
+```
+
+**The Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+plot(x = user_dist_resultsg, y = "prec/rec", annotate = c(1,3))
+```
+
+
+We can see from the above graphs that the Pearson distance performs worst while Jaccard distance seems to outperform the other distance method. Both Cosine and Pearson seem to have close curves.  
+
+**Calculation of Accuracy for Jaccard**
+
+```{R}
+model_jacg <- Recommender(getData(esSplitg, "train"), method = "UBCF", 
+                     param=list(method="jaccard", nn=100))
+prediction_jacg <- predict(model_jacg, getData(esSplitg, "known"))
+rmse_dist_jacg <- calcPredictionAccuracy(prediction_jacg,getData(esSplitg,"unknown"), given=-1)
+df_rmse_dist_jac <- as.data.frame((rmse_dist_jacg), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracyg <- (df_rmse_dist_jac[1,1] + df_rmse_dist_jac[4,1])/(df_rmse_dist_jac[1,1] + df_rmse_dist_jac[2,1] + df_rmse_dist_jac[3,1] + df_rmse_dist_jac[4,1])
+rmseg <- rbind(df_rmse_dist_jac,accuracyg)
+
+rownames(rmseg)[9]<-"Accuracy"
+colnames(rmseg)[1] <-"Parameters Jaccard"
+rmseg
+```
+We can see from the above table that our accuracy imporoved from 0.939 to 0.952. As we can see from the results above, Jaccard distance yields better prediction with 95% accuracy, and in terms of precision and True positive rates. Our best user based collaborative filtering model ends up incorporating the following parameters:  
+
+  * Uses the 100 nearest neighbors
+  * Calculates the similarity using Jaccard's Similarity
+  
+  
+###  3.2 - Item Based Collaborative Filtering 
+
+We will now work on developing an item based collaborative filter algorithm by following the same methodology as above and find the best item based model by comparing the different parameters. 
+
+#### 3.2.1 - Neighborhood Size 
+
+We will start by looking at 4 different neighborhood sizes for the item-based CF. We keep other parameters constant for test purposes. It is obvious that the bigger the number of items, the better the model will be. However, we will stop at 20 nearest items to compare with other items, which is around 15% of our items.
+
+```{R}
+#Leveraging recommenderlabs ability to run multiple models at once for evaluation.
+item_kg <- list(
+  "3 K" = list(name="IBCF", param=list(method="Cosine",
+                                        k=3)),
+  "5 K" = list(name="IBCF", param=list(method="Cosine",
+                                         k=5)),
+  "10 K" = list(name="IBCF", param=list(method="Cosine",
+                                         k=10)),
+  "20 K" = list(name="IBCF", param=list(method="Cosine",
+                                         k=20))
+)
+
+# Run the algorithm and predice the next n items for comparison purposes
+item_k_resultsg <- evaluate(esSplitg, item_kg, n = recsg, progress = FALSE)
+```
+
+**The ROC Curve**
+```{R}
+# Draw the ROC curve
+plot(x = item_k_resultsg, y = "ROC", annotate = 1, legend="topleft")
+```
+
+
+**The Precision / Recall Curve**
+```{R}
+# Draw the precision / recall curve
+plot(x = item_k_resultsg, y = "prec/rec", annotate = 1)
+```
+
+
+Looking at the above ROC curves, we see that k=20 gives the best results. From the precision curve, we see that the k=10 intersects with k=20 around 3 items prediction. Hence, it would make sense to evaluate both measures closer in order to choose a the best feature.
+
+**Comparing Accuracy** 
+
+```{R}
+item_model_10g <- Recommender(getData(esSplitg, "train"), method = "IBCF", 
+                     param=list( method="Cosine", k= 10))
+item_prediction_10g <- predict(item_model_10g, getData(esSplitg, "known"))
+rmse_ibcf_10g <- calcPredictionAccuracy(item_prediction_10g, getData(esSplitg, "unknown"),given=-1)
+df_rmse_ibcf_10g <- as.data.frame((rmse_ibcf_10g), col.names="Value")
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy10g <- (df_rmse_ibcf_10g[1,1] + df_rmse_ibcf_10g[4,1])/(df_rmse_ibcf_10g[1,1] + df_rmse_ibcf_10g[2,1] + df_rmse_ibcf_10g[3,1] + df_rmse_ibcf_10g[4,1])
+
+
+item_model_20g <- Recommender(getData(esSplitg, "train"), method = "IBCF", 
+                     param=list(method="Cosine", k= 20))
+item_prediction_20g <- predict(item_model_20g, getData(esSplitg, "known"))
+rmse_ibcf_20g <- calcPredictionAccuracy(item_prediction_20g, getData(esSplitg, "unknown"),given=-1)
+df_rmse_ibcf_20g <- as.data.frame((rmse_ibcf_20g), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy20g <- (df_rmse_ibcf_20g[1,1] + df_rmse_ibcf_20g[4,1])/(df_rmse_ibcf_20g[1,1] + df_rmse_ibcf_20g[2,1] + df_rmse_ibcf_20g[3,1] + df_rmse_ibcf_20g[4,1])
+
+
+accu_table <- rbind(accuracy10g,accuracy20g)
+rownames(accu_table)[1] <- 'IBCF-10K'
+rownames(accu_table)[2] <- 'IBCF-20K'
+colnames(accu_table)[1] <- 'Accuracy'
+accu_table
+
+```
+
+The result above shows that model with k = 10 yields better prediction with a slightly higher accuracy rate of 0.954. Thus, we will move along with comparing users with a parameter of 10 items in the neighborhood. 
+
+#### 3.2.2 - Distance Parameter
+
+The final parameter that we will be tweaking is the measurement of the distance or similarity of an item and their nearest neighbors. To do this, we will look at three different measurements of the similarity; Pearson, Cosine, and Jaccard distances. Using the results from the previous analysis, we will use the 10 nearest items as we analyze the distance parameters.
+
+```{R}
+item_distg <- list(
+  "Pearson" = list(name="IBCF", param=list(method="pearson",
+                                         k=10)),
+  "Cosine" = list(name="IBCF", param=list(method="Cosine",
+                                         k=10)),
+  "Jaccard" = list(name="IBCF", param=list(method="jaccard",
+                                         k=10))
+)
+
+item_dist_resultsg <- evaluate(esSplitg, item_distg, n = recsg, progress = FALSE)
+```
+
+**ROC Curve**
+
+```{R}
+# Draw the ROC curve
+plot(x = item_dist_resultsg, y = "ROC", annotate = 3, legend="topleft")
+```
+
+**Precision / Recall Curve**
+
+```{R}
+# Draw the precision / recall curve
+ plot(x = item_dist_resultsg, y = "prec/rec", annotate = c(1,3))
+```
+
+The Jaccard curve outperforms both models in terms of precision, however cosine is pretty close. We will compare the accuracy of both to choose which one outperforms the other in terms of recommendation. 
+  
+**Comparing Accuracy**   
+
+```{r}
+#Predict Accuracy Table for Jaccard
+fitem_model_10 <- Recommender(getData(esSplitg, "train"), method = "IBCF", 
+                     param=list( method="Jaccard", k= 10))
+fitem_prediction_10 <- predict(fitem_model_10, getData(esSplitg, "known"))
+frmse_ibcf_10 <- calcPredictionAccuracy(fitem_prediction_10, getData(esSplitg, "unknown"),given=-1)
+dff_rmse_ibcf_10 <- as.data.frame((frmse_ibcf_10), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy5 <- (dff_rmse_ibcf_10[1,1] + dff_rmse_ibcf_10[4,1])/(dff_rmse_ibcf_10[1,1] + dff_rmse_ibcf_10[2,1] + dff_rmse_ibcf_10[3,1] + dff_rmse_ibcf_10[4,1])
+
+rmse5 <- rbind(dff_rmse_ibcf_10,accuracy5)
+rownames(rmse5)[9]<-"Accuracy"
+colnames(rmse5)[1] <-"Parameters Jaccard"
+
+#Combine Jaccard table with previously calculated table for Cosine
+rmse3 <- rbind(dff_rmse_ibcf_10,accuracy10g)
+comp<-cbind(rmse5,rmse3)
+colnames(comp)[2] <-"Parameters Cosine"
+comp
+```
+With the above numbers, we see the model has barely progressed in choosing between Cosinee and Jaccard, even though Jaccard gave a better precision rate, Cosine gave a better accuracy rate and hence, we will go with cosine with an accuracy rate of 0.954.
+
+Our best user based collaborative filtering model ends up incorporating the following parameters:  
+
+  * 10 Nearest Items
+  * Similarity Calculated using Cosine Method
+
+### 4. Comparision between IBCF and UBCF in terms of actual item recommendations
+
+Now that we have these two models, lets compare them to each other. From our comparison, we see that item based model performs better than the user based model in terms of Accuracy. The results make sense, because the item basket gives more insights and better prediction of what items go together. However, when looking at the precision and recall rates, the data suggests that it might be better to choose based on the number of recommendations. For example, people who bought 4 items; milk, butter, yoghurt and abrasive cleaner. We can notice that the models predict 6 items similarly. The diffrence is in 4 different recommended items. The UBCF model suggested Curd, coffee, citrus fruit and soda. the IBCF suggested Fruit/vegetable juice, pip fruit, pork and pastry.
+
+```{r}
+
+UBCF_e<-as.data.frame(as(prediction_jacg, "list")[1],col.names="UBCF_reccommended_for_User1")
+IBCF_e<-as.data.frame(as(item_prediction_10g, "list")[1],col.names="IBCF_reccommended_for_User1")
+
+cbind(UBCF_e,IBCF_e)
+
+```
+
+
+### 5. Popularity Based Algorithm
+
+Popularity based model only recommends the most popular items in the baskets of the users. There are no parameters to tweak here, however it will be compared to random.
+
+```{r eval=TRUE, echo=FALSE}
+
+pop_algorithms <- list(
+  "Random" = list(name="Random"),
+  "POP" = list(name="POPULAR")
+)
+
+user_pop_results <- evaluate(esSplitg, pop_algorithms, n = recsg, progress = FALSE)
+
+```
+
+**The ROC Curve**
+
+```{r eval=TRUE, echo=FALSE}
+# Draw the ROC curve
+plot(x =user_pop_results, y = "ROC", annotate = 1)
+```
+
+**The Precision / Recall Curve**
+
+```{r eval=TRUE, echo=FALSE}
+plot(x = user_pop_results, y = "prec/rec", annotate = 1)
+```
+
+**Calculating the Accuracy**
+
+```{r}
+
+model_pop <- Recommender(getData(esSplitg, "train"), method = "POPULAR")
+prediction_pop <- predict(model_pop, getData(esSplitg, "known"))
+rmse_pop <- calcPredictionAccuracy(prediction_pop,getData(esSplitg,"unknown"),given=-1)
+df_pop <- as.data.frame((rmse_pop), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy6 <- (df_pop[1,1] + df_pop[4,1])/(df_pop[1,1] + df_pop[2,1] + df_pop[3,1] + df_pop[4,1])
+rmse6 <- rbind(df_pop,accuracy6)
+rownames(rmse6)[9]<-"Accuracy"
+colnames(rmse6)[1] <-"Parameters Popularity"
+rmse6
+
+```
+
+It could be seen that popular algorithm performs much better than Random algorithm. This is in line with our expectation since random algorithm recommend random items without considering user's past interractions. While Popular algorithm recommends popular items, since shoppers are likely to buy popular items such as milk and vegetables, this algorithm will have a higher accuracy rate.
+
+### 6. Association Rule Based Algorithm
+
+Association Rule model recommends items based on a set of rules selected on the number of times they occured. We will explore the support and confidence and the maximum number of items in each data set. A rule with high support and confidence level should lead to better recommendations.
+
+- Support is an indication of how frequently the itemset appears in the dataset. A rule with low support is likely to be uninteresting from a business perspective because it may not be profitable to promote items that customers seldom buy.
+ - Confidence is an indication of how often the rule has been found to be true. 
+ - Maxlen is the maximum number of items that can be present in the rule (we have chosen 3), in order to filter out the rules (three items seems to be a logical criteria to suggest an item, maxlen of 2 will be too low). 
+ - Lift Value should not be below one. Since we don't want to recommend items that will result in less purchases of the original basket.
+
+**Rules Explorations**
+
+Lets explore the rules' behaviours by setting the all the parameters very low. 
+
+```{r}
+ar_rec <- Recommender(getData(esSplitg, "train"), method = "AR",
+                              parameter=list(support = 0.001, conf = 0.1, maxlen                                = 3))
+
+prediction_ar <- predict(ar_rec, getData(esSplitg, "known"))
+arModel <- getModel(ar_rec)$rule_base
+
+```
+
+**Rule Sort By Confidence**
+
+```{r}
+inspect(head(sort(arModel, by="confidence", decreasing=TRUE), 10))
+```
+
+**Rule Sort By Lift**
+
+```{r}
+inspect(head(sort(arModel, by="lift", decreasing=TRUE),10))
+```
+
+**Rule Sort By Support**
+
+```{r}
+inspect(head(sort(arModel, by="support", decreasing=TRUE), 10))
+```
+
+From the above table, we can see that the highest level of confidence is 1, the maximum lift is 38 and maximum rule support is 0.756. The lift is a good criteria to filter out rules as a high lift means high asscociation between the items.
+
+**Calculating Accuracy**
+
+```{r}
+rmse_ar <- calcPredictionAccuracy(prediction_ar, getData(esSplitg, "unknown"),given=-1)
+df_ar <- as.data.frame((rmse_ar), col.names="Value")
+
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy7 <- (df_ar[1,1] + df_ar[4,1])/(df_ar[1,1] + df_ar[2,1] + df_ar[3,1] + df_ar[4,1])
+rmse7 <- rbind(df_ar,accuracy7)
+rownames(rmse7)[9]<-"Accuracy"
+colnames(rmse7)[1] <-"Parameters AR"
+rmse7
+```
+
+Moreover, when calculating the predictions, we also get a low result if no rules were filtered
+
+Lets explore the result with different support parameters, ideally we would be looking for rules with high lift, high support and high confidence.  
+
+```{r}
+#Please install the arulesViz packages before running the markdown
+if(!"arulesViz" %in% installed.packages()) {install.packages("arulesViz")}
+library("arulesViz")
+
+plot(arModel, measure = c("support", "confidence"), shading = "lift")
+```
+
+Looking at the graph above, the high lift items have low support and high confidence rate.
+We will keep the support at 0.01 and increase the confidence to 0.3 which seems to have high lifts.
+
+```{r}
+ar_rec2 <- Recommender(getData(esSplitg, "train"), method = "AR",
+                              parameter=list(support = 0.01, conf = 0.3, maxlen                                = 3))
+
+prediction_ar2 <- predict(ar_rec2, getData(esSplitg, "known"))
+arModel2 <- getModel(ar_rec2)$rule_base
+plot(arModel2, measure = c("support", "confidence"), shading = "lift")
+```
+
+As per the scatter plot above, we will be left with 125 rules out of the 18,595 that contain the high lifts.
+
+```{r}
+rmse_ar2 <- calcPredictionAccuracy(prediction_ar2, getData(esSplitg, "unknown"),given=-1)
+df_ar2 <- as.data.frame((rmse_ar2), col.names="Value")
+#Accuracy = (TP + TN) / (TP + FP + TN + FN)
+accuracy8 <- (df_ar2[1,1] + df_ar2[4,1])/(df_ar2[1,1] + df_ar2[2,1] + df_ar2[3,1] + df_ar2[4,1])
+rmse8 <- rbind(df_ar2,accuracy8)
+rownames(rmse8)[9]<-"Accuracy"
+colnames(rmse8)[1] <-"CONFIDENCE-0.3"
+rmse8
+
+```
+
+We can see that the Accuracy calculations have increased a lot from 0.953 to 0.987 compared to the other models based on those 125 rules, and the precision and recall rates increased by almost double. As we increase the confidence level, the accuracy increases, however the number rules decrease from 125 to 56. Most of the recommendations will be limited to popular items such as whole milk and vegetables. At the confidence level of 0.3, more diverse set of rules will be recommended. Thus, for business reasons, we decided to choose the confidence level of 0.3. 
+
+The final parameter for our AR algorithms:
+ - Rule support = 0.01
+ - Confidence = 0.3
+
+## 7. Comparing All The Models 
+
+**The ROC curve**
+
+```{r}
+final_algorithms5 <- list(
+  "UBCF" = list(name="UBCF", param=list(method="jaccard",
+                                         nn=100)),
+  "IBCF" = list(name="IBCF", param=list(method="Cosine",
+                                         k=10)),
+  "POP" = list(name="POPULAR"),
+  "Random" = list(name="Random"),
+  "AR"= list(name="AR",param=list(support = 0.01, conf = 0.3, maxlen= 3))
+)
+
+final_results5 <- evaluate(esSplitg, final_algorithms5, n = recsg, progress = FALSE)
+```
+
+
+```{r eval=TRUE, echo=FALSE}
+# Draw the ROC curve
+plot(x = final_results5, y = "ROC", annotate = 3)
+```
+
+**Precision Curve**
+
+```{r eval=TRUE, echo=FALSE}
+plot(x = final_results5, y = "prec/rec", annotate = 3)
+```
+
+**Accuracy Table**
+
+```{r}
+colnames(rmseg) <- "UBCF"
+colnames(rmse3) <- "IBCF"
+colnames(rmse6) <- "POPULARITY"
+colnames(rmse8) <- "AR"
+cbind(rmseg,rmse3,rmse6,rmse8)
+```
+
+Comparing the four models together in the ROC curve, we can see that **UBCF** and **Popularity** compete with each other as they are very close to each other and perform better than **IBCF**. However the Accuracy of the **IBCF** is higher because the item based model is able to better predict the items that the consumer might not want to buy (in other words: prediction with higher True Negative rate). The **Popularity** method recommends items based on their popularity and not based on the user's behavior, hence the risk here is slightly high in predicting the correct recommendation as it is not tailor-made to the user's behaviors.
+
+Having put everything together in order to evaluate the different models, we get that the best two models in terms of Accuracy are: **AR** ( 98%), **IBCF** (95.4%). These models also score well in precision, however looking at the ROC curve and precision, we see that these two models aren't the best performing ones. The reason behind it is that these models are good at predicting True Negative.
+
+**Comparison for items recommended to a random user**
+
+Now we will proceed to explore how each algorithm recommends to 1 selected User of the dataset. 
+
+```{r}
+a<-(getData(esSplitg, "known"))
+USER_e<-as.data.frame(as(head(a),"list"),col.names="Items_bought_by_T1")
+USER_e
+```
+
+As we can see, this User consumed whole milk, butter, yogurt and abrasive cleaner. We proceed to explore what other algorithms recommend based on the basket of this user. 
+
+```{r}
+POP_e<-as.data.frame(as(prediction_pop, "list")[1],col.names="POP")
+cbind(UBCF_e,IBCF_e,POP_e)
+```
+
+Popularity algorithm recommended 5 items in common and as like for the other models, we will explore the other items. Soda was recommended by **UBCF**, pastry was recommended by **IBCF**, the remaining items are Shopping bags, sausage and bottled beer. Bottled Beer and sausage are popular items, however they can be unsuitable for everyone, however Shopping bags can be a good recommendation for everyone since it is not based on taste or likings but on the amount of items purchased. This shows that the **Popularity** algorithm doesn't base on preferences but on most popular items, and can be biased for a user.
+
+```{r}
+AR_e<-as.data.frame(as(prediction_ar2, "list")[1],col.names="AR reccommended for T1")
+AR_e
+```
+
+**AR** model recommended to our user who bought Whole milk, butter, yogurt and abrasive cleaner two items that he already bought, and the other item was other vegetables. The reason behind this is because the algorithm tried different combinations of the items bought by the user and it resulted in a correct prediction which explains the high accuracy. Additionally, algorithm is based on previous purchased items, thus it might make sense to recommend users to buy again the same products in the future. 
+
+
+## RESULT DISCUSSION
+
+Looking at what our models predicted, the most accurate one was **Association Rule** model, however the recommendations given don't match our business scope which is to recommend new items to users to increase their basket volume. However, it did predict an item which was not purchased by the user which was other Vegetables. Other Vegetables was also recommended by all other models.
+
+All other models recommended at least 5 similar items, which means that all models were able to recommend the same basket items of the user. However, if we were to select a model, this will depend on the following characteristics among others:
+- The scope and use of the recommendation model
+- Acurracy rate threshold
+- Do we want a user tailor-made or a generic model
+- Precision of the model
+
+Each model has its advantages, and being able to have a combination of all has its advantages. Based on our example, we do want to recommend our users the shopping bags, however we also want to remind the user to buy coffee with their milk.
+
+Having to choose 1 model, we find that the best fit one is the **IBCF**. The reason behind our choice is as follow:
+
+**AR** has the highest accuracy rate, however it is only based on specific set of rules. Most of the rules will recommend a similar item. For example, out of the 125 rule,s most of them will recommend Whole milk and other Vegetables. What about the other items which are on our item list? The selection of recommendation in this case is very limited and not so personalised. AR doesn't take into account the order of items; it simply tries to get the best rules. Therefore it's understandable to get "unintuitive" rules like recommending the items that the user has already bought because maybe it correlates with other items that he has bought. We believe this would be a good model to use for the placement of the items in the store, rather than to target a specific clients to add items in their basket.
+
+**Popularity** model, not the best accuracy, and a biased recommender. This model will be recommending to all the clients the same item (can be a good model for the check out counter for example). The model doesn't tailor-make the recommendations to the clients and also, same issue as the AR model, doesn't go through all the items available in our store.
+
+**UBCF** is a good model however its accuracy rate was below the IBCF one and that is the reason it wasn't selected. Therefore, our final selected model is IBCF with parameter of 10 nearest items and Cosine similarity. 
+
+
+
+
+
+
