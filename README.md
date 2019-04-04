@@ -11,6 +11,8 @@ This section explores the different algorithms and different parameters of each 
 
 ## MovieLense Discussion 
 
+<img width="650" alt="Screen Shot 2019-04-04 at 15 22 04" src="https://user-images.githubusercontent.com/44138106/55559911-731d8e00-56ef-11e9-87c0-333f1d3912a9.png">
+
 From our above comparison of the three models, we can see that, with our best parameter set, the UBCF model performs better on our test data set than the IBCF and ALS. The UBCF shows better results in both the ROC curve and the precision recall curves. Additionally, UBCF has a higher accuracy score compared to the other 2 models.
 
 An explanation for the better performance of the UBCF could be that in the current dataset, there is still a low number of users. For movie recommendation engines of companies like Netflix and Amazon, IBCF is likely to outperform since the number of users is significantly larger than the number of movies. From a business perspective, a good movie recommendation system is a combination of content-based filtering and collaborative filtering which potentially takes advantage of both the representation of the content as well as the similarities among users. This task could be done with extra information about the content of the movie.
@@ -20,8 +22,9 @@ Our final selected model is **UBCF with parameter of 100 nearest neighbors and J
 ## Groceries Analysis 
 There are 9835 transactions with 169 categories. The labels mentioned above which are then grouped into 55 levels of 2 categories which are then groupped into 10 levels of 1 category.
 
-
 ## Groceries Discussion 
+
+<img width="675" alt="Screen Shot 2019-04-04 at 15 33 34" src="https://user-images.githubusercontent.com/44138106/55559912-73b62480-56ef-11e9-885c-6b91b15412d3.png">
 
 Having to choose 1 model, we find that the best fit one is the **IBCF**. The reason behind our choice is as follow:
 
