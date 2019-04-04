@@ -13,7 +13,7 @@ The objective of this report is to identify the best recommendation algorithm fo
   - Accuracy measures how often the algorithm is correct out of all predictions
   - Root mean square estimation is an estimate for the average difference between the
     predicted value and the actual value. We aim at an algorithm with the lowest RMSE. 
-  - Precision: Out of all the recommended items, how many did the user actually like. The higher the              precision the better the algorithm. 
+  - Precision: Out of all the recommended items, how many did the user actually like. The higher the precision the better the algorithm. 
 
 ## I. MOVIELENSE DATASET
 
